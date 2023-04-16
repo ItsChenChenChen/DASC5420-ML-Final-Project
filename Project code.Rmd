@@ -1,0 +1,403 @@
+---
+title: "ML project"
+author: "Cong Chen"
+date: "2023-04-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## data and first glance
+```{r}
+originalData <- read.csv("~/Documents/winter 23/ML/project/data/winequality-red.csv")
+dim(originalData)
+head(originalData)
+str(originalData)
+summary(originalData)
+
+boxplot(originalData) #extreme outlier in total.sulfur.dioxide
+```
+
+
+
+
+### preprocessing in 2.1, deleting outliers and create "good wine" column as response
+```{r}
+## use filter() to delete outliers
+library(dplyr)
+
+# Define upper limit 
+upper_limit <- 250
+df_filtered <- filter(originalData, total.sulfur.dioxide <= upper_limit)
+# str(df_filtered)
+
+## scale the predictors
+df_scaled <- scale(df_filtered[, -12])
+# summary(df_scaled)
+
+## delete "quality" column (the 12th column), and save the proprocess data as wine_data
+wine_data <- as.data.frame(df_scaled)
+wine_data$good.wine <- df_filtered$quality >= 6
+
+str(wine_data)
+```
+
+
+
+### 2.2 eda
+#### correlation matrix
+```{r}
+library(corrplot)
+cor_matrix <- cor(wine_data)
+#adjust the label fontsize using tl.cex; and mar is to set the plot margin 
+corrplot(cor_matrix, is.corr = TRUE, method = "color",
+         tl.cex = 0.8, main = "Correlation Matrix for Wine Data",
+         mar = c(1,1,3,1))
+```
+
+### class distribution
+```{r}
+library(ggplot2)
+
+ggplot(wine_data, aes(x = factor(good.wine))) +
+  geom_bar(aes(fill = factor(good.wine))) +
+  scale_fill_manual(values = c("red", "blue"), name = "Good Wine") +
+  labs(x = "Response Variable", y = "Count")
+```
+
+### feature distribution
+ggplot do a feature distribution, code reference: http://www.cookbook-r.com/Graphs/Plotting_distributions_(ggplot2)/
+
+putting multiple ggplots together, code reference https://www.datanovia.com/en/lessons/combine-multiple-ggplots-into-a-figure/
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+predictors <- colnames(wine_data)[1:11]
+
+plots <- list()
+
+for (i in 1:length(predictors)) {
+  p <- ggplot(wine_data, aes_string(x = predictors[i], fill = "factor(good.wine)")) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("#0072B2", "#E69F00"), name = "Good Wine") +
+    labs(x = predictors[i], y = "Density")
+  plots[[i]] <- p
+}
+
+grid.arrange(grobs = plots, ncol = 3, nrow = 4)
+```
+
+
+## train test split
+```{r}
+set.seed(14)
+
+## as.factor() returns false as 1 and true as 2, most package use levels as indicators so it would be fine. but when use the this column as numeric, be sure to declare true as 1 and false as 0.
+wine_data$good.wine <- as.factor(wine_data$good.wine)
+str(wine_data)
+
+
+# train ratio 0.8
+train_index <- sample(nrow(wine_data), 0.8 * nrow(wine_data))
+
+
+train <- wine_data[train_index, ]
+test <- wine_data[-train_index, ]
+
+```
+
+## check if repsonse is correct
+```{r}
+originalResponse <- df_filtered$quality >= 6
+originalResponse <- as.factor(originalResponse)
+sum(originalResponse != wine_data$good.wine)
+```
+
+## logistic regression
+```{r}
+## use glm()
+lr <- glm(good.wine~.,family = binomial,data=train)
+# summary(lr)
+
+predictions <- ifelse(predict(lr, type = "response", newdata = test) > 0.5, 1, 0)
+
+table(predictions, test$good.wine) ## too many false negative
+
+## when just using as.numeric(), have to declear the assigning rule, otherwise, it would set false as 1 and true as 2
+sum(predictions == as.numeric(test$good.wine == 'TRUE'))/nrow(test)
+
+
+##train accuracy
+pred_lr_train <- ifelse(predict(lr, type = "response", newdata = train) > 0.5, 1, 0)
+table(pred_lr_train, train$good.wine)
+
+sum(pred_lr_train == as.numeric(train$good.wine == 'TRUE'))/nrow(train)
+```
+
+
+## knn
+```{r}
+library(ISLR)
+library(class)
+
+set.seed(14)
+#knn() return predictions, remember to not include the response in train and test
+# euclidean distance is the default
+pred_knn <- knn(train = train[, -12], test = test[, -12],
+                cl = train$good.wine,
+                k = 5)
+
+table(pred_knn, test$good.wine)
+sum(pred_knn == test$good.wine)/nrow(test)
+
+
+
+```
+
+## use cv to get optimal k
+```{r}
+library(caret)
+
+set.seed(14)
+
+k_grid <- expand.grid(k = seq(1, 50,  by =  2))
+
+# euclidean distance is the default for train() to do a knn
+knn_cv <- train(good.wine ~ ., data=train,
+               method='knn',
+               tuneGrid = k_grid,
+               trControl = trainControl(method = "cv", number = 10))
+knn_cv$bestTune 
+
+pred_cv_knn <- predict(knn_cv, newdata = test)
+
+table(pred_cv_knn, test$good.wine)
+sum(pred_cv_knn == test$good.wine)/nrow(test)
+
+```
+
+
+## svm
+```{r}
+library(e1071)
+
+set.seed(14)
+svm_model <- svm(good.wine~., data = train)
+pred_svm <- predict(svm_model, newdata = test)
+
+table(pred_svm, test$good.wine)
+sum(pred_svm == test$good.wine)/nrow(test)
+```
+
+## cv to svm
+using caret train() to do cv for svm, code reference: https://stackoverflow.com/questions/20461476/svm-with-cross-validation-in-r-using-caret
+```{r}
+library(caret)
+library(e1071)
+
+#test three different C values and kernel
+set.seed(14)
+## radial kernel require sigma values
+tune_grid_radial = expand.grid(sigma = c(0.01, 0.1, 1),
+                               C = c(1, 10, 100, 1000))
+
+svm_cv_radial <- train(good.wine ~ ., data=train,
+               method='svmRadial',
+               tuneGrid = tune_grid_radial,
+               trControl = trainControl(method = "cv", number = 10))
+svm_cv_radial$bestTune 
+
+pred_svm_cv_radial <- predict(svm_cv_radial, newdata = test)
+
+table(pred_svm_cv_radial, test$good.wine)
+sum(pred_svm_cv_radial == test$good.wine)/nrow(test)
+
+##train accuracy for radial
+pred_svm_cv_radial_train <- predict(svm_cv_radial, newdata = train)
+
+table(pred_svm_cv_radial_train, train$good.wine)
+sum(pred_svm_cv_radial_train == train$good.wine)/nrow(train)
+
+## using linear kernel
+tune_grid_linear = expand.grid(C = c(1, 10, 100, 1000))
+svm_cv_linear <- train(good.wine ~ ., data=train,
+               method='svmLinear',
+               tuneGrid = tune_grid_linear,
+               trControl = trainControl(method = "cv", number = 10))
+svm_cv_linear$bestTune 
+
+
+pred_svm_cv_linear <- predict(svm_cv_linear, newdata = test)
+
+table(pred_svm_cv_linear, test$good.wine)
+sum(pred_svm_cv_linear == test$good.wine)/nrow(test)
+
+##train accuracy for linear
+pred_svm_cv_linear_train <- predict(svm_cv_linear, newdata = train)
+
+table(pred_svm_cv_linear_train, train$good.wine)
+sum(pred_svm_cv_linear_train == train$good.wine)/nrow(train)
+
+```
+
+## decision tree
+```{r}
+library(rpart)
+set.seed(14)
+dtree <- rpart(good.wine~., data = train, method = "class")
+
+plot(dtree)
+text(dtree, cex = 0.7)
+
+pred_dtree <- predict(dtree, newdata = test, type = "class")
+
+table(pred_dtree , test$good.wine)
+sum(pred_dtree  == test$good.wine)/nrow(test)
+
+## train accuracy
+pred_dtree_train <- predict(dtree, newdata = train, type = "class")
+
+table(pred_dtree_train , train$good.wine)
+sum(pred_dtree_train  == train$good.wine)/nrow(train)
+
+
+
+```
+
+## do a cv for decision tree
+code reference: https://www.kaggle.com/code/hamelg/intro-to-r-part-29-decision-trees
+```{r}
+train_ctrl <- trainControl(method = 'cv',
+                           number = 10
+                           )
+
+tune_grid <- expand.grid(cp = seq(0, 0.1, by = 0.01))
+
+set.seed(14)
+dtree_cv <- train(good.wine ~ ., data = train, method = 'rpart',
+                  trControl = train_ctrl,
+                  tuneGrid = tune_grid)
+
+pred_dtree_cv <- predict(dtree_cv, newdata = test)
+
+table(pred_dtree_cv , test$good.wine)
+sum(pred_dtree_cv  == test$good.wine)/nrow(test)
+
+## train accuracy
+pred_dtree_cv_train <- predict(dtree_cv, newdata = train)
+
+table(pred_dtree_cv_train , train$good.wine)
+sum(pred_dtree_cv_train  == train$good.wine)/nrow(train)
+```
+
+## use tree package to do a decision tree and cv
+```{r}
+library(tree)
+set.seed(14)
+wine_tree <- tree(good.wine ~ ., train)
+summary(wine_tree)
+
+plot(wine_tree)
+text(wine_tree,pretty=0)
+
+pred_wine_tree <- predict(wine_tree, newdata = test, type = 'class')
+
+table(pred_wine_tree, test$good.wine)
+sum(pred_wine_tree == test$good.wine)/nrow(test)
+
+
+set.seed(14)
+wine_tree_cv=cv.tree(wine_tree,  FUN = prune.misclass)
+
+par(mfrow = c(1, 2))
+plot(wine_tree_cv$size,wine_tree_cv$dev,type='b')
+plot(wine_tree_cv$k,wine_tree_cv$dev,type='b')
+
+wine_tree_prune <- prune.tree(wine_tree,best=6)
+plot(wine_tree_prune)
+text(wine_tree_prune,pretty=0)
+summary(wine_tree_prune)
+
+pred_wine_tree_prune <- predict(wine_tree_prune, newdata = test, type = 'class')
+
+table(pred_wine_tree_prune, test$good.wine)
+sum(pred_wine_tree_prune == test$good.wine)/nrow(test)
+
+## train error of a pruned tree
+pred_wine_tree_prune_train <- predict(wine_tree_prune, newdata = train, type = 'class')
+
+table(pred_wine_tree_prune_train, train$good.wine)
+sum(pred_wine_tree_prune_train == train$good.wine)/nrow(train)
+
+```
+
+## random forest
+```{r}
+library(randomForest)
+
+calculate_accuracy <- function(model, data) {
+  predicted_resposne <- predict(model, data, type = 'class')
+  actual_response <- data$good.wine
+  
+  confus_matrix <- table(predicted_resposne, actual_response)
+  print(confus_matrix)
+  
+  accuracy <- sum(predicted_resposne == actual_response)/nrow(data)
+  return(accuracy)
+}
+
+
+set.seed(14)
+# use all 11 predictors, and tree number is default 500
+rf <- randomForest(good.wine ~ ., data = train, mtry=11,importance=TRUE)
+
+calculate_accuracy(rf, test)
+calculate_accuracy(rf, train)
+
+## use less trees 
+rf_tree20 <- randomForest(good.wine ~ ., data = train, 
+                          mtry=11, ntree = 20,
+                          importance=TRUE)
+
+
+calculate_accuracy(rf_tree20, test)
+calculate_accuracy(rf_tree20, train)
+
+## use less predictors
+rf_pred5 <- randomForest(good.wine ~ ., data = train, mtry=4,importance=TRUE)
+
+calculate_accuracy(rf_pred5, test)
+calculate_accuracy(rf_pred5, train)
+
+accuracy_result_rd <- seq(0, 11)
+for (i in 1:11) {
+  rf_pred_result <- randomForest(good.wine ~ ., data = train, mtry=i,importance=TRUE)
+  accuracy_result_rd[i] <- calculate_accuracy(rf_pred_result, test)
+}
+plot(accuracy_result_rd[-12], ylim = c(0.77, 0.81), type = 'l', xlab="Number of Predictos", ylab = "Test Accuracy")
+
+# # check the importance of variables
+# importance(rf)
+# # varImpPlot(rf)
+# 
+# importance(rf_tree20)
+# # varImpPlot(rf_tree20)
+# 
+# importance(rf_pred5)
+# # varImpPlot(rf_pred5)
+```
+
+### cross validation
+```{r}
+par(mfrow = c(2, 2))
+plot(knn_cv)
+plot(svm_cv_radial)
+plot(svm_cv_linear)
+plot(wine_tree_cv)
+
+```
+
